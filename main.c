@@ -3,6 +3,7 @@
 #include <libk/ctype.h>
 #include <vitasdk.h>
 #include <taihen.h>
+#include "renderer.h"
 
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
@@ -16,6 +17,17 @@ void *fb = NULL;
 void *src_fb = NULL;
 int dst_x, dst_y, src_w, src_h, src_p;
 
+// Available modes 
+enum {
+	RESCALER_OFF
+};
+
+char *str_mode[] = {
+	"No Rescaler"
+};
+
+int mode = RESCALER_OFF;
+
 // Simplified generic hooking function
 void hookFunction(uint32_t nid, const void *func){
 	hooks[current_hook] = taiHookFunctionImport(&refs[current_hook],TAI_MAIN_MODULE,TAI_ANY_LIBRARY,nid,func);
@@ -25,19 +37,25 @@ void hookFunction(uint32_t nid, const void *func){
 int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncObject *newBuffer, const void *callbackData) {
 	
 	// Performing a data transfer with sceGxmTransfer if a new framebuffer got allocated
-	if (fb != NULL) {	
-		sceGxmTransferCopy(
-			src_w, src_h,
-			0x00000000, 0x00000000, SCE_GXM_TRANSFER_COLORKEY_NONE,
-			SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
-			SCE_GXM_TRANSFER_LINEAR,
-			src_fb,
-			0, 0, src_p,
-			SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
-			SCE_GXM_TRANSFER_LINEAR,
-			fb,
-			dst_x, dst_y, 960 * sizeof(uint32_t),
-			NULL, SCE_GXM_TRANSFER_FRAGMENT_SYNC, NULL);
+	if (fb != NULL) {
+		updateFramebuf(fb, 960, 544, 960);
+		switch (mode){
+		case RESCALER_OFF:
+			sceGxmTransferCopy(
+				src_w, src_h,
+				0x00000000, 0x00000000, SCE_GXM_TRANSFER_COLORKEY_NONE,
+				SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+				SCE_GXM_TRANSFER_LINEAR,
+				src_fb, 0, 0, src_p,
+				SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+				SCE_GXM_TRANSFER_LINEAR,
+				fb, dst_x, dst_y, 960 * sizeof(uint32_t),
+				NULL, SCE_GXM_TRANSFER_FRAGMENT_SYNC, NULL);
+			break;
+		default:
+			break;
+		}
+		drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s)", src_w, src_h, str_mode[mode]);
 	}
 	
 	return TAI_CONTINUE(int, refs[1], oldBuffer, newBuffer, callbackData);
