@@ -118,11 +118,11 @@ int sceGxmShaderPatcherCreate_patched(const SceGxmShaderPatcherParams *params, S
 	matrix4x4_init_orthographic(projection, 0, 960, 544, 0, -1, 1);
 	matrix4x4_multiply(mvp, projection, modelview);
 	
+	// Allocating a generic buffer to use for our stuffs
 	uint8_t *gpu_buffer = NULL;
 	uint32_t gpu_buffer_size = 4 * 1024;
-	SceUID memblock = sceKernelAllocMemBlock("reRescaler fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, gpu_buffer_size, NULL);
+	SceUID memblock = sceKernelAllocMemBlock("reRescaler gpu buffer", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, gpu_buffer_size, NULL);
 	sceKernelGetMemBlockBase(memblock, &gpu_buffer);
-	
 	sceGxmMapMemory(gpu_buffer, 4 * 1024, SCE_GXM_MEMORY_ATTRIB_RW);
 	vertices = (vector3f*)gpu_buffer;
 	indices = (uint16_t*)(&gpu_buffer[sizeof(vector3f) * 4]);
@@ -163,16 +163,20 @@ int sceGxmShaderPatcherCreate_patched(const SceGxmShaderPatcherParams *params, S
 
 int sceGxmCreateContext_patched(const SceGxmContextParams *params, SceGxmContext **context) {
 	int res = TAI_CONTINUE(int, refs[2], params, context);
+	
+	// Grabbing a reference to the created sceGxm context
 	gxm_context = *context;
+	
 	return res;
 }
 
 int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncObject *newBuffer, const void *callbackData) {
 	
-	// Performing a data transfer with sceGxmTransfer if a new framebuffer got allocated
 	if (fb != NULL) {
 		updateFramebuf(fb, 960, 544, 960);
 		switch (mode){
+			
+		// Performing a data transfer with sceGxmTransfer if a new framebuffer got allocated
 		case RESCALER_OFF:
 			sceGxmTransferCopy(
 				src_w, src_h,
@@ -185,6 +189,8 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 				fb, dst_x, dst_y, 960 * sizeof(uint32_t),
 				NULL, SCE_GXM_TRANSFER_FRAGMENT_SYNC, NULL);
 			break;
+			
+		// Performing a rescale with standard sceGxm without a display queue
 		case RESCALE_NOFILTER:
 		case ORIGINAL:
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
@@ -269,10 +275,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 				SCE_GXM_COLOR_SURFACE_LINEAR,
 				SCE_GXM_COLOR_SURFACE_SCALE_NONE,
 				SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
-				960,
-				544,
-				960,
-				fb);
+				960, 544, 960, fb);
 			
 		}
 		
