@@ -23,6 +23,8 @@ void hookFunction(uint32_t nid, const void *func){
 }
 
 int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncObject *newBuffer, const void *callbackData) {
+	
+	// Performing a data transfer with sceGxmTransfer if a new framebuffer got allocated
 	if (fb != NULL) {	
 		sceGxmTransferCopy(
 			src_w, src_h,
@@ -37,29 +39,46 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			dst_x, dst_y, 960 * sizeof(uint32_t),
 			NULL, SCE_GXM_TRANSFER_FRAGMENT_SYNC, NULL);
 	}
+	
 	return TAI_CONTINUE(int, refs[1], oldBuffer, newBuffer, callbackData);
 }
 
 int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	
+	// For 960x544 games, the plugin is useless
 	if (pParam->width != 960) {
+		
+		// Discarding constantness of pParam
 		SceDisplayFrameBuf *p = (SceDisplayFrameBuf*)pParam;
-		if (fb == NULL) { 
+		
+		// Setup code
+		if (fb == NULL) {
+			
+			// Allocating our 960x544 framebuffer
 			uint32_t fb_size = ALIGN(960 * 544 * 4, 0x40000);
-			SceUID memblock = sceKernelAllocMemBlock("reRescaler fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, fb_size, NULL);;
+			SceUID memblock = sceKernelAllocMemBlock("reRescaler fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, fb_size, NULL);
 			sceKernelGetMemBlockBase(memblock, &fb);
+			
+			// Not enough CDRAM memory, plugin disabled
+			if (fb == NULL) return TAI_CONTINUE(int, refs[0], pParam, sync);
+			
+			// Mapping framebuffer into sceGxm and saving constant values for later usage
 			sceGxmMapMemory(fb, fb_size, SCE_GXM_MEMORY_ATTRIB_RW);
 			src_w = p->width;
 			src_h = p->height;
 			dst_x = (960 - src_w) / 2;
 			dst_y = (544 - src_h) / 2;
 			src_p = p->pitch * sizeof(uint32_t);
+			
 		}
+		
+		// Patching pParam and grabbing current framebuffer data address
 		src_fb = p->base;
 		p->pitch = p->width = 960;
 		p->height = 544;
 		p->base = fb;
 	}
+	
 	return TAI_CONTINUE(int, refs[0], pParam, sync);
 }
 
@@ -67,7 +86,6 @@ void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
 	
 	// Hooking functions
-	//hookFunction(0x207AF96B, sceGxmCreateRenderTarget_patched);
 	hookFunction(0x7A410B64, sceDisplaySetFrameBuf_patched);
 	hookFunction(0xEC5C26B5, sceGxmDisplayQueueAddEntry_patched);
 	
