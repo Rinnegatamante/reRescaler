@@ -28,6 +28,7 @@ endif()
 add_executable(reRescaler
   main.c
   renderer.c
+  math_utils.c
 )
 
 target_link_libraries(reRescaler
