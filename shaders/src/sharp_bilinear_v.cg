@@ -1,0 +1,38 @@
+/* COMPATIBILITY 
+   - HLSL compilers
+   - Cg   compilers
+*/
+
+/*
+   Author: Themaister
+   License: Public domain
+*/
+
+struct input
+{
+   float2 video_size;
+   float2 texture_size;
+   float2 output_size;
+};
+
+struct out_vertex
+{
+   float4 vPosition : POSITION;
+   float2 vTexcoord : TEXCOORD0;
+   float2 texel : TEXCOORD1;
+};
+
+void main
+(
+   float4 aPosition,
+   float2 aTexcoord,
+   column_major uniform float4x4 wvp,
+   uniform input IN,
+   out out_vertex co
+)
+{
+   co.vPosition = mul(aPosition, wvp);
+   co.vTexcoord = aTexcoord - float2(0.25 / IN.texture_size.x, 0.0);
+
+   co.texel = aTexcoord * IN.texture_size;
+}
