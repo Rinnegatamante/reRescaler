@@ -10,7 +10,8 @@
 
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
-#define HOOKS_NUM 5 // Hooked functions num
+#define HOOKS_NUM 4 // Hooked functions num
+#define MODES_NUM 3 // Available rescaling modes
 
 static uint8_t current_hook;
 static SceUID hooks[HOOKS_NUM];
@@ -28,7 +29,6 @@ SceGxmFragmentProgram *fragment_program_patched;
 
 static SceGxmRenderTarget *gxm_render_target;
 static SceGxmColorSurface gxm_color_surface;
-static SceGxmSyncObject *gxm_sync_object;
 static SceGxmTexture gxm_texture;
 static SceGxmContext *gxm_context;
 static SceGxmShaderPatcher *gxm_shader_patcher;
@@ -41,6 +41,7 @@ static matrix4x4 mvp;
 static vector3f *vertices = NULL;
 static uint16_t *indices = NULL;
 static vector2f *texcoords = NULL;
+static uint64_t tick = 0;
 
 // Available modes 
 enum {
@@ -49,7 +50,7 @@ enum {
 	ORIGINAL
 };
 
-char *str_mode[] = {
+char *str_mode[MODES_NUM] = {
 	"No Rescaler",
 	"No Bilinear",
 	"Original",
@@ -57,19 +58,9 @@ char *str_mode[] = {
 
 int mode = RESCALE_NOFILTER;
 
-// Simplified generic hooking function
-void hookFunction(uint32_t nid, const void *func){
-	hooks[current_hook] = taiHookFunctionImport(&refs[current_hook],TAI_MAIN_MODULE,TAI_ANY_LIBRARY,nid,func);
-	current_hook++;
-}
-
-int sceGxmShaderPatcherCreate_patched(const SceGxmShaderPatcherParams *params, SceGxmShaderPatcher **shaderPatcher){
-	int res =  TAI_CONTINUE(int, refs[3], params, shaderPatcher);
+void setupShaders() {
 	
-	// Grabbing a reference to used shader patcher
-	gxm_shader_patcher = *shaderPatcher;
-	
-	// Registering our shaders
+		// Registering our shaders
 	sceGxmShaderPatcherRegisterProgram(
 		gxm_shader_patcher,
 		gxm_program_texture2d_v,
@@ -157,6 +148,19 @@ int sceGxmShaderPatcherCreate_patched(const SceGxmShaderPatcherParams *params, S
 	texcoords[2].y = 1.0f;
 	texcoords[3].x = 1.0f;
 	texcoords[3].y = 0.0f;
+}
+
+// Simplified generic hooking function
+void hookFunction(uint32_t nid, const void *func){
+	hooks[current_hook] = taiHookFunctionImport(&refs[current_hook],TAI_MAIN_MODULE,TAI_ANY_LIBRARY,nid,func);
+	current_hook++;
+}
+
+int sceGxmShaderPatcherCreate_patched(const SceGxmShaderPatcherParams *params, SceGxmShaderPatcher **shaderPatcher){
+	int res =  TAI_CONTINUE(int, refs[3], params, shaderPatcher);
+	
+	// Grabbing a reference to used shader patcher
+	gxm_shader_patcher = *shaderPatcher;
 	
 	return res;
 }
@@ -232,6 +236,16 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 
 int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	
+	SceCtrlData pad;
+	sceCtrlPeekBufferPositive(0, &pad, 1);
+	if (pad.buttons & SCE_CTRL_LTRIGGER) {
+		if (tick == 0) tick = sceKernelGetProcessTimeWide();
+		else if (sceKernelGetProcessTimeWide() - tick > 4000000) {
+			tick = 0;
+			mode = (mode + 1) % MODES_NUM;
+		}
+	}
+	
 	// For 960x544 games, the plugin is useless
 	if (pParam->width != 960) {
 		
@@ -257,13 +271,17 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			dst_y = (544 - src_h) / 2;
 			src_p = p->pitch * sizeof(uint32_t);
 			
+		}
+		
+		if (mode > RESCALER_OFF && gxm_render_target == NULL) {
+			
 			// Creating a render target for our patched framebuffer
 			SceGxmRenderTargetParams render_target_params;
 			memset(&render_target_params, 0, sizeof(SceGxmRenderTargetParams));
 			render_target_params.flags = 0;
 			render_target_params.width = 960;
 			render_target_params.height = 544;
-			render_target_params.scenesPerFrame = 8;
+			render_target_params.scenesPerFrame = 1;
 			render_target_params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
 			render_target_params.multisampleLocations = 0;
 			render_target_params.driverMemBlock = -1;
@@ -276,6 +294,9 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 				SCE_GXM_COLOR_SURFACE_SCALE_NONE,
 				SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
 				960, 544, 960, fb);
+				
+			// Setting up required shaders
+			setupShaders();
 			
 		}
 		
