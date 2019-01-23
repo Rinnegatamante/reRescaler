@@ -3,15 +3,24 @@
 #include <libk/ctype.h>
 #include <vitasdk.h>
 #include <taihen.h>
-#include "renderer.h"
-#include "texture2d_f.h"
-#include "texture2d_v.h"
 #include "math_utils.h"
+#include "renderer.h"
+
+#include "shaders/texture2d_f.h"
+#include "shaders/texture2d_v.h"
+#include "shaders/lcd3x_f.h"
+#include "shaders/lcd3x_v.h"
+#include "shaders/sharp_bilinear_f.h"
+#include "shaders/sharp_bilinear_v.h"
+#include "shaders/sharp_bilinear_simple_f.h"
+#include "shaders/sharp_bilinear_simple_v.h"
+#include "shaders/xbr_2x_fast_f.h"
+#include "shaders/xbr_2x_fast_v.h"
 
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
 #define HOOKS_NUM 4 // Hooked functions num
-#define MODES_NUM 3 // Available rescaling modes
+#define MODES_NUM 7 // Available rescaling modes
 
 static uint8_t current_hook;
 static SceUID hooks[HOOKS_NUM];
@@ -23,9 +32,22 @@ int dst_x, dst_y, src_w, src_h, src_p;
 
 static const SceGxmProgram *const gxm_program_texture2d_v = (SceGxmProgram*)&texture2d_v;
 static const SceGxmProgram *const gxm_program_texture2d_f = (SceGxmProgram*)&texture2d_f;
+SceGxmProgram *complex_vshaders[] = {
+	(SceGxmProgram*)&sharp_bilinear_v,
+	(SceGxmProgram*)&sharp_bilinear_simple_v,
+	(SceGxmProgram*)&lcd3x_v,
+	(SceGxmProgram*)&xbr_2x_fast_v
+};
+SceGxmProgram *complex_fshaders[] = {
+	(SceGxmProgram*)&sharp_bilinear_f,
+	(SceGxmProgram*)&sharp_bilinear_simple_f,
+	(SceGxmProgram*)&lcd3x_f,
+	(SceGxmProgram*)&xbr_2x_fast_f
+};
+const SceGxmProgramParameter *shader_params[6];
 
-SceGxmVertexProgram *vertex_program_patched;
-SceGxmFragmentProgram *fragment_program_patched;
+SceGxmVertexProgram *vertex_program_patched = NULL;
+SceGxmFragmentProgram *fragment_program_patched = NULL;
 
 static SceGxmRenderTarget *gxm_render_target;
 static SceGxmColorSurface gxm_color_surface;
@@ -39,26 +61,128 @@ static const SceGxmProgramParameter *wvp;
 
 static matrix4x4 mvp;
 static vector3f *vertices = NULL;
+static vector4f *vertices_big = NULL;
 static uint16_t *indices = NULL;
 static vector2f *texcoords = NULL;
+uint8_t *gpu_buffer = NULL;
+void *vertex_buffer, *fragment_buffer;
+
 static uint64_t tick = 0;
+
+vector2f *orig_res = NULL;
+vector2f *target_res = NULL;
+
+int renderer_ready = 0;
 
 // Available modes 
 enum {
 	RESCALER_OFF,
 	RESCALE_NOFILTER,
-	ORIGINAL
+	ORIGINAL,
+	SHARP_BILINEAR,
+	SHARP_BILINEAR_SIMPLE,
+	LCD_3X,
+	XBR_X2_FAST
 };
 
 char *str_mode[MODES_NUM] = {
 	"No Rescaler",
 	"No Bilinear",
 	"Original",
+	"Sharp Bilinear",
+	"Sharp Bilinear Simple",
+	"LCD x3",
+	"xBR x2 Fast"
 };
 
-int mode = RESCALE_NOFILTER;
+int mode = SHARP_BILINEAR_SIMPLE;
 
-void setupShaders() {
+void releaseOldShader() {
+	if (vertex_program_patched != NULL) {
+		renderer_ready = 0;
+		sceGxmShaderPatcherReleaseFragmentProgram(gxm_shader_patcher, fragment_program_patched);
+		sceGxmShaderPatcherReleaseVertexProgram(gxm_shader_patcher, vertex_program_patched);
+		sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, fragment_id);
+		sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vertex_id);
+	}
+}
+
+void setupGenericAttribs() {
+	if (gpu_buffer == NULL) {
+		
+		// Setting up default modelviewprojection matrix
+		matrix4x4 projection, modelview;
+		matrix4x4_identity(modelview);
+		matrix4x4_init_orthographic(projection, 0, 960, 544, 0, -1, 1);
+		matrix4x4_multiply(mvp, projection, modelview);
+	
+		// Allocating a generic buffer to use for our stuffs
+		uint32_t gpu_buffer_size = 4 * 1024;
+		SceUID memblock = sceKernelAllocMemBlock("reRescaler gpu buffer", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, gpu_buffer_size, NULL);
+		sceKernelGetMemBlockBase(memblock, (void*)&gpu_buffer);
+		sceGxmMapMemory(gpu_buffer, 4 * 1024, SCE_GXM_MEMORY_ATTRIB_RW);
+		vertices = (vector3f*)gpu_buffer;
+		indices = (uint16_t*)(&gpu_buffer[sizeof(vector3f) * 4]);
+		texcoords = (vector2f*)(&gpu_buffer[(sizeof(vector3f) + sizeof(uint16_t)) * 4]);
+		vertices_big = (vector4f*)(&gpu_buffer[(sizeof(vector3f) + sizeof(uint16_t) + sizeof(vector2f)) * 4]);
+		orig_res = (vector2f*)(&gpu_buffer[(sizeof(vector3f) + sizeof(uint16_t) + sizeof(vector2f) + sizeof(vector4f)) * 4]);
+		target_res = (vector2f*)(&gpu_buffer[(sizeof(vector3f) + sizeof(uint16_t) + sizeof(vector2f) + sizeof(vector4f)) * 4 + sizeof(vector2f)]);
+		
+		orig_res[0].x = src_w * 1.0f;
+		orig_res[1].y = src_h * 1.0f;
+		target_res[0].x = 960.0f;
+		target_res[1].y = 544.0f;
+		
+		// Setting up default vertices
+		vertices[0].x = 0.0f;
+		vertices[0].y = 0.0f;
+		vertices[0].z = 1.0f;
+		vertices[1].x = 0.0f;
+		vertices[1].y = 544.0f;
+		vertices[1].z = 1.0f;
+		vertices[2].x = 960.0f;
+		vertices[2].y = 544.0f;
+		vertices[2].z = 1.0f;
+		vertices[3].x = 960.0f;
+		vertices[3].y = 0.0f;
+		vertices[3].z = 1.0f;
+		vertices_big[0].x = 0.0f;
+		vertices_big[0].y = 0.0f;
+		vertices_big[0].z = 0.0f;
+		vertices_big[0].w = 1.0f;
+		vertices_big[1].x = 0.0f;
+		vertices_big[1].y = 544.0f;
+		vertices_big[1].z = 0.0f;
+		vertices_big[1].w = 1.0f;
+		vertices_big[2].x = 960.0f;
+		vertices_big[2].y = 544.0f;
+		vertices_big[2].z = 0.0f;
+		vertices_big[2].w = 1.0f;
+		vertices_big[3].x = 960.0f;
+		vertices_big[3].y = 0.0f;
+		vertices_big[3].z = 0.0f;
+		vertices_big[3].w = 1.0f;
+		
+		// Setting up default indices
+		int i;
+		for (i=0;i<4;i++){
+			indices[i] = i;
+		}
+	
+		// Setting up default texcoords
+		texcoords[0].x = 0.0f;
+		texcoords[0].y = 0.0f;
+		texcoords[1].x = 0.0f;
+		texcoords[1].y = 1.0f;
+		texcoords[2].x = 1.0f;
+		texcoords[2].y = 1.0f;
+		texcoords[3].x = 1.0f;
+		texcoords[3].y = 0.0f;
+	}
+	renderer_ready = 1;
+}
+
+void setupStandardShaders() {
 	
 		// Registering our shaders
 	sceGxmShaderPatcherRegisterProgram(
@@ -76,78 +200,89 @@ void setupShaders() {
 	wvp = sceGxmProgramFindParameterByName(gxm_program_texture2d_v, "wvp");
 	
 	// Setting up our vertex stream attributes
-	SceGxmVertexAttribute texture2d_vertex_attribute[2];
-	SceGxmVertexStream texture2d_vertex_stream[2];
-	texture2d_vertex_attribute[0].streamIndex = 0;
-	texture2d_vertex_attribute[0].offset = 0;
-	texture2d_vertex_attribute[0].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
-	texture2d_vertex_attribute[0].componentCount = 3;
-	texture2d_vertex_attribute[0].regIndex = sceGxmProgramParameterGetResourceIndex(position);
-	texture2d_vertex_attribute[1].streamIndex = 1;
-	texture2d_vertex_attribute[1].offset = 0;
-	texture2d_vertex_attribute[1].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
-	texture2d_vertex_attribute[1].componentCount = 2;
-	texture2d_vertex_attribute[1].regIndex = sceGxmProgramParameterGetResourceIndex(texcoord);
-	texture2d_vertex_stream[0].stride = sizeof(vector3f);
-	texture2d_vertex_stream[0].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-	texture2d_vertex_stream[1].stride = sizeof(vector2f);
-	texture2d_vertex_stream[1].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-
+	SceGxmVertexAttribute vertex_attribute[2];
+	SceGxmVertexStream vertex_stream[2];
+	vertex_attribute[0].streamIndex = 0;
+	vertex_attribute[0].offset = 0;
+	vertex_attribute[0].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+	vertex_attribute[0].componentCount = 3;
+	vertex_attribute[0].regIndex = sceGxmProgramParameterGetResourceIndex(position);
+	vertex_attribute[1].streamIndex = 1;
+	vertex_attribute[1].offset = 0;
+	vertex_attribute[1].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+	vertex_attribute[1].componentCount = 2;
+	vertex_attribute[1].regIndex = sceGxmProgramParameterGetResourceIndex(texcoord);
+	vertex_stream[0].stride = sizeof(vector3f);
+	vertex_stream[0].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+	vertex_stream[1].stride = sizeof(vector2f);
+	vertex_stream[1].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+	
 	// Creating our shader programs
 	sceGxmShaderPatcherCreateVertexProgram(gxm_shader_patcher,
-		vertex_id, texture2d_vertex_attribute,
-		2, texture2d_vertex_stream, 2, &vertex_program_patched);
+		vertex_id, vertex_attribute,
+		2, vertex_stream, 2, &vertex_program_patched);
 
 	sceGxmShaderPatcherCreateFragmentProgram(gxm_shader_patcher,
 		fragment_id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
-		SCE_GXM_MULTISAMPLE_NONE, NULL, NULL,
+		SCE_GXM_MULTISAMPLE_NONE, NULL, gxm_program_texture2d_v,
 		&fragment_program_patched);
+	
+	 setupGenericAttribs();
+}
+
+void setupComplexShader(int i) {
+	
+	// Registering our shaders
+	sceGxmShaderPatcherRegisterProgram(
+		gxm_shader_patcher,
+		complex_vshaders[i],
+		&vertex_id);
+	sceGxmShaderPatcherRegisterProgram(
+		gxm_shader_patcher,
+		complex_fshaders[i],
+		&fragment_id);
 		
-	// Setting up default modelviewprojection matrix
-	matrix4x4 projection, modelview;
-	matrix4x4_identity(modelview);
-	matrix4x4_init_orthographic(projection, 0, 960, 544, 0, -1, 1);
-	matrix4x4_multiply(mvp, projection, modelview);
+	// Getting references to our vertex streams/uniforms
+	position = sceGxmProgramFindParameterByName(complex_vshaders[i], "aPosition");
+	texcoord = sceGxmProgramFindParameterByName(complex_vshaders[i], "aTexcoord");
+	wvp = sceGxmProgramFindParameterByName(complex_vshaders[i], "wvp");
 	
-	// Allocating a generic buffer to use for our stuffs
-	uint8_t *gpu_buffer = NULL;
-	uint32_t gpu_buffer_size = 4 * 1024;
-	SceUID memblock = sceKernelAllocMemBlock("reRescaler gpu buffer", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, gpu_buffer_size, NULL);
-	sceKernelGetMemBlockBase(memblock, &gpu_buffer);
-	sceGxmMapMemory(gpu_buffer, 4 * 1024, SCE_GXM_MEMORY_ATTRIB_RW);
-	vertices = (vector3f*)gpu_buffer;
-	indices = (uint16_t*)(&gpu_buffer[sizeof(vector3f) * 4]);
-	texcoords = (vector2f*)(&gpu_buffer[(sizeof(vector3f) + sizeof(uint16_t)) * 4]);
+	// Setting up our vertex stream attributes
+	SceGxmVertexAttribute vertex_attribute[2];
+	SceGxmVertexStream vertex_stream[2];
+	vertex_attribute[0].streamIndex = 0;
+	vertex_attribute[0].offset = 0;
+	vertex_attribute[0].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+	vertex_attribute[0].componentCount = 4;
+	vertex_attribute[0].regIndex = sceGxmProgramParameterGetResourceIndex(position);
+	vertex_attribute[1].streamIndex = 1;
+	vertex_attribute[1].offset = 0;
+	vertex_attribute[1].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+	vertex_attribute[1].componentCount = 2;
+	vertex_attribute[1].regIndex = sceGxmProgramParameterGetResourceIndex(texcoord);
+	vertex_stream[0].stride = sizeof(vector4f);
+	vertex_stream[0].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+	vertex_stream[1].stride = sizeof(vector2f);
+	vertex_stream[1].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
 	
-	// Setting up default vertices
-	vertices[0].x = 0.0f;
-	vertices[0].y = 0.0f;
-	vertices[0].z = 1.0f;
-	vertices[1].x = 0.0f;
-	vertices[1].y = 544.0f;
-	vertices[1].z = 1.0f;
-	vertices[2].x = 960.0f;
-	vertices[2].y = 544.0f;
-	vertices[2].z = 1.0f;
-	vertices[3].x = 960.0f;
-	vertices[3].y = 0.0f;
-	vertices[3].z = 1.0f;
+	shader_params[0] = sceGxmProgramFindParameterByName(complex_vshaders[i], "IN.video_size");
+	shader_params[1] = sceGxmProgramFindParameterByName(complex_vshaders[i], "IN.texture_size");
+	shader_params[2] = sceGxmProgramFindParameterByName(complex_vshaders[i], "IN.output_size");
+	shader_params[3] = sceGxmProgramFindParameterByName(complex_fshaders[i], "IN2.video_size");
+	shader_params[4] = sceGxmProgramFindParameterByName(complex_fshaders[i], "IN2.texture_size");
+	shader_params[5] = sceGxmProgramFindParameterByName(complex_fshaders[i], "IN2.output_size");
 	
-	// Setting up default indices
-	int i;
-	for (i=0;i<4;i++){
-		indices[i] = i;
-	}
+	// Creating our shader programs
+	sceGxmShaderPatcherCreateVertexProgram(gxm_shader_patcher,
+		vertex_id, vertex_attribute,
+		2, vertex_stream, 2, &vertex_program_patched);
+
+	sceGxmShaderPatcherCreateFragmentProgram(gxm_shader_patcher,
+		fragment_id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+		SCE_GXM_MULTISAMPLE_NONE, NULL, complex_vshaders[i],
+		&fragment_program_patched);
 	
-	// Setting up default texcoords
-	texcoords[0].x = 0.0f;
-	texcoords[0].y = 0.0f;
-	texcoords[1].x = 0.0f;
-	texcoords[1].y = 1.0f;
-	texcoords[2].x = 1.0f;
-	texcoords[2].y = 1.0f;
-	texcoords[3].x = 1.0f;
-	texcoords[3].y = 0.0f;
+	setupGenericAttribs();
 }
 
 // Simplified generic hooking function
@@ -177,6 +312,25 @@ int sceGxmCreateContext_patched(const SceGxmContextParams *params, SceGxmContext
 int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncObject *newBuffer, const void *callbackData) {
 	
 	if (fb != NULL) {
+		
+		SceCtrlData pad;
+		sceCtrlPeekBufferPositive(0, &pad, 1);
+		if (pad.buttons & SCE_CTRL_LTRIGGER) {
+			if (tick == 0) tick = sceKernelGetProcessTimeWide();
+			else if (sceKernelGetProcessTimeWide() - tick > 4000000) {
+				tick = 0;
+				mode = (mode + 1) % MODES_NUM;
+				if (mode > RESCALER_OFF && gxm_render_target != NULL) {
+				
+					// Setting up required shaders
+					releaseOldShader();
+					if (mode <= ORIGINAL) setupStandardShaders();
+					else setupComplexShader(mode - 3);
+			
+				}
+			}
+		} else tick = 0;
+		
 		updateFramebuf(fb, 960, 544, 960);
 		switch (mode){
 			
@@ -197,6 +351,7 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		// Performing a rescale with standard sceGxm without a display queue
 		case RESCALE_NOFILTER:
 		case ORIGINAL:
+			if (!renderer_ready) break;
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
 			sceGxmTextureSetMagFilter(&gxm_texture, mode == ORIGINAL ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmTextureSetMinFilter(&gxm_texture, mode == ORIGINAL ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
@@ -216,11 +371,49 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			sceGxmSetBackDepthFunc(gxm_context, SCE_GXM_DEPTH_FUNC_ALWAYS);
 			sceGxmSetVertexProgram(gxm_context, vertex_program_patched);
 			sceGxmSetFragmentProgram(gxm_context, fragment_program_patched);
-			void* vertex_wvp_buffer;
-			sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_wvp_buffer);
-			sceGxmSetUniformDataF(vertex_wvp_buffer, wvp, 0, 16, (const float*)mvp);
+			sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer);
+			sceGxmSetUniformDataF(vertex_buffer, wvp, 0, 16, (const float*)mvp);
 			sceGxmSetFragmentTexture(gxm_context, 0, &gxm_texture);
 			sceGxmSetVertexStream(gxm_context, 0, vertices);
+			sceGxmSetVertexStream(gxm_context, 1, texcoords);
+			sceGxmDraw(gxm_context, SCE_GXM_PRIMITIVE_TRIANGLE_FAN, SCE_GXM_INDEX_FORMAT_U16, indices, 4);
+			sceGxmEndScene(gxm_context, NULL, NULL);
+			break;
+		case SHARP_BILINEAR:
+		case SHARP_BILINEAR_SIMPLE:
+		case LCD_3X:
+		case XBR_X2_FAST:
+			if (!renderer_ready) break;
+			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
+			sceGxmTextureSetMagFilter(&gxm_texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
+			sceGxmTextureSetMinFilter(&gxm_texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
+			sceGxmSetFrontFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
+			sceGxmSetBackFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
+			sceGxmSetFrontPolygonMode(gxm_context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+			sceGxmSetBackPolygonMode(gxm_context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+			sceGxmSetTwoSidedEnable(gxm_context, SCE_GXM_TWO_SIDED_DISABLED);
+			sceGxmSetCullMode(gxm_context, SCE_GXM_CULL_NONE);
+			sceGxmSetFrontVisibilityTestEnable(gxm_context,SCE_GXM_VISIBILITY_TEST_DISABLED);
+			sceGxmSetBackVisibilityTestEnable(gxm_context,SCE_GXM_VISIBILITY_TEST_DISABLED);
+			sceGxmBeginScene(gxm_context, 0, gxm_render_target,
+				NULL, NULL, NULL, &gxm_color_surface, NULL);
+			sceGxmSetFrontStencilFunc(gxm_context,SCE_GXM_STENCIL_FUNC_ALWAYS,SCE_GXM_STENCIL_OP_KEEP,SCE_GXM_STENCIL_OP_KEEP,SCE_GXM_STENCIL_OP_KEEP,0,0);
+			sceGxmSetBackStencilFunc(gxm_context,SCE_GXM_STENCIL_FUNC_ALWAYS,SCE_GXM_STENCIL_OP_KEEP,SCE_GXM_STENCIL_OP_KEEP,SCE_GXM_STENCIL_OP_KEEP,0,0);
+			sceGxmSetFrontDepthFunc(gxm_context, SCE_GXM_DEPTH_FUNC_ALWAYS);
+			sceGxmSetBackDepthFunc(gxm_context, SCE_GXM_DEPTH_FUNC_ALWAYS);
+			sceGxmSetVertexProgram(gxm_context, vertex_program_patched);
+			sceGxmSetFragmentProgram(gxm_context, fragment_program_patched);
+			sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer);
+			sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fragment_buffer);
+			sceGxmSetUniformDataF(vertex_buffer, wvp, 0, 16, (const float*)mvp);
+			sceGxmSetUniformDataF(vertex_buffer, shader_params[0], 0, 2, (const float*)orig_res);
+			sceGxmSetUniformDataF(vertex_buffer, shader_params[1], 0, 2, (const float*)orig_res);
+			sceGxmSetUniformDataF(vertex_buffer, shader_params[2], 0, 2, (const float*)target_res);
+			sceGxmSetUniformDataF(fragment_buffer, shader_params[3], 0, 2, (const float*)orig_res);
+			sceGxmSetUniformDataF(fragment_buffer, shader_params[4], 0, 2, (const float*)orig_res);
+			sceGxmSetUniformDataF(fragment_buffer, shader_params[5], 0, 2, (const float*)target_res);
+			sceGxmSetFragmentTexture(gxm_context, 0, &gxm_texture);
+			sceGxmSetVertexStream(gxm_context, 0, vertices_big);
 			sceGxmSetVertexStream(gxm_context, 1, texcoords);
 			sceGxmDraw(gxm_context, SCE_GXM_PRIMITIVE_TRIANGLE_FAN, SCE_GXM_INDEX_FORMAT_U16, indices, 4);
 			sceGxmEndScene(gxm_context, NULL, NULL);
@@ -235,16 +428,6 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 }
 
 int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
-	
-	SceCtrlData pad;
-	sceCtrlPeekBufferPositive(0, &pad, 1);
-	if (pad.buttons & SCE_CTRL_LTRIGGER) {
-		if (tick == 0) tick = sceKernelGetProcessTimeWide();
-		else if (sceKernelGetProcessTimeWide() - tick > 4000000) {
-			tick = 0;
-			mode = (mode + 1) % MODES_NUM;
-		}
-	}
 	
 	// For 960x544 games, the plugin is useless
 	if (pParam->width != 960) {
@@ -271,10 +454,6 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			dst_y = (544 - src_h) / 2;
 			src_p = p->pitch * sizeof(uint32_t);
 			
-		}
-		
-		if (mode > RESCALER_OFF && gxm_render_target == NULL) {
-			
 			// Creating a render target for our patched framebuffer
 			SceGxmRenderTargetParams render_target_params;
 			memset(&render_target_params, 0, sizeof(SceGxmRenderTargetParams));
@@ -294,9 +473,14 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 				SCE_GXM_COLOR_SURFACE_SCALE_NONE,
 				SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
 				960, 544, 960, fb);
+			
+			if (mode > RESCALER_OFF) {
 				
-			// Setting up required shaders
-			setupShaders();
+				// Setting up required shaders
+				if (mode <= ORIGINAL) setupStandardShaders();
+				else setupComplexShader(mode - 3);
+
+			}
 			
 		}
 		
