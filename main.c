@@ -26,7 +26,7 @@ static tai_hook_ref_t refs[HOOKS_NUM];
 
 void *fb = NULL;
 void *src_fb = NULL;
-int dst_x, dst_y, src_w, src_h, src_p;
+int dst_x, dst_y, src_w, src_h, src_p, src_s;
 
 static const SceGxmProgram *const gxm_program_texture2d_v = (SceGxmProgram*)&texture2d_v;
 static const SceGxmProgram *const gxm_program_texture2d_f = (SceGxmProgram*)&texture2d_f;
@@ -89,7 +89,7 @@ char *str_mode[MODES_NUM] = {
 	"LCD x3"
 };
 
-int mode = SHARP_BILINEAR_SIMPLE;
+int mode = RESCALER_OFF;
 
 void releaseOldShader() {
 	if (vertex_program_patched != NULL) {
@@ -164,13 +164,14 @@ void setupGenericAttribs() {
 		}
 	
 		// Setting up default texcoords
+		float w = (src_w * 1.0f) / (src_s * 1.0f);
 		texcoords[0].x = 0.0f;
 		texcoords[0].y = 0.0f;
 		texcoords[1].x = 0.0f;
 		texcoords[1].y = 1.0f;
-		texcoords[2].x = 1.0f;
+		texcoords[2].x = w;
 		texcoords[2].y = 1.0f;
-		texcoords[3].x = 1.0f;
+		texcoords[3].x = w;
 		texcoords[3].y = 0.0f;
 	}
 	renderer_ready = 1;
@@ -352,7 +353,7 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		// Performing a rescale with standard sceGxm without a display queue
 		case ORIGINAL:
 			if (!renderer_ready) break;
-			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
+			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_s, src_h, 0);
 			sceGxmTextureSetMagFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmTextureSetMinFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmSetFrontFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
@@ -379,12 +380,13 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			sceGxmDraw(gxm_context, SCE_GXM_PRIMITIVE_TRIANGLE_FAN, SCE_GXM_INDEX_FORMAT_U16, indices, 4);
 			sceGxmEndScene(gxm_context, NULL, NULL);
 			break;
+
 		// Performing a rescale with standard sceGxm without a display queue and custom shaders
 		case SHARP_BILINEAR:
 		case SHARP_BILINEAR_SIMPLE:
 		case LCD_3X:
 			if (!renderer_ready) break;
-			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
+			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_s, src_h, 0);
 			sceGxmTextureSetMagFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmTextureSetMinFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmSetFrontFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
@@ -454,6 +456,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			dst_x = (960 - src_w) / 2;
 			dst_y = (544 - src_h) / 2;
 			src_p = p->pitch * sizeof(uint32_t);
+			src_s = p->pitch;
 			
 			// Creating a render target for our patched framebuffer
 			SceGxmRenderTargetParams render_target_params;
