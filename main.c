@@ -385,8 +385,8 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		case LCD_3X:
 			if (!renderer_ready) break;
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
-			sceGxmTextureSetMagFilter(&gxm_texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
-			sceGxmTextureSetMinFilter(&gxm_texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
+			sceGxmTextureSetMagFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+			sceGxmTextureSetMinFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmSetFrontFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
 			sceGxmSetBackFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
 			sceGxmSetFrontPolygonMode(gxm_context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
