@@ -14,13 +14,11 @@
 #include "shaders/sharp_bilinear_v.h"
 #include "shaders/sharp_bilinear_simple_f.h"
 #include "shaders/sharp_bilinear_simple_v.h"
-#include "shaders/xbr_2x_fast_f.h"
-#include "shaders/xbr_2x_fast_v.h"
 
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
 #define HOOKS_NUM 4 // Hooked functions num
-#define MODES_NUM 7 // Available rescaling modes
+#define MODES_NUM 5 // Available rescaling modes
 
 static uint8_t current_hook;
 static SceUID hooks[HOOKS_NUM];
@@ -35,14 +33,12 @@ static const SceGxmProgram *const gxm_program_texture2d_f = (SceGxmProgram*)&tex
 SceGxmProgram *complex_vshaders[] = {
 	(SceGxmProgram*)&sharp_bilinear_v,
 	(SceGxmProgram*)&sharp_bilinear_simple_v,
-	(SceGxmProgram*)&lcd3x_v,
-	(SceGxmProgram*)&xbr_2x_fast_v
+	(SceGxmProgram*)&lcd3x_v
 };
 SceGxmProgram *complex_fshaders[] = {
 	(SceGxmProgram*)&sharp_bilinear_f,
 	(SceGxmProgram*)&sharp_bilinear_simple_f,
-	(SceGxmProgram*)&lcd3x_f,
-	(SceGxmProgram*)&xbr_2x_fast_f
+	(SceGxmProgram*)&lcd3x_f
 };
 const SceGxmProgramParameter *shader_params[6];
 
@@ -68,31 +64,29 @@ uint8_t *gpu_buffer = NULL;
 void *vertex_buffer, *fragment_buffer;
 
 static uint64_t tick = 0;
+static uint64_t tick2 = 0;
 
 vector2f *orig_res = NULL;
 vector2f *target_res = NULL;
 
 int renderer_ready = 0;
+int bilinear = 0;
 
 // Available modes 
 enum {
 	RESCALER_OFF,
-	RESCALE_NOFILTER,
 	ORIGINAL,
 	SHARP_BILINEAR,
 	SHARP_BILINEAR_SIMPLE,
-	LCD_3X,
-	XBR_X2_FAST
+	LCD_3X
 };
 
 char *str_mode[MODES_NUM] = {
 	"No Rescaler",
-	"No Bilinear",
 	"Original",
 	"Sharp Bilinear",
 	"Sharp Bilinear Simple",
-	"LCD x3",
-	"xBR x2 Fast"
+	"LCD x3"
 };
 
 int mode = SHARP_BILINEAR_SIMPLE;
@@ -325,11 +319,18 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 					// Setting up required shaders
 					releaseOldShader();
 					if (mode <= ORIGINAL) setupStandardShaders();
-					else setupComplexShader(mode - 3);
+					else setupComplexShader(mode - 2);
 			
 				}
 			}
 		} else tick = 0;
+		if (pad.buttons & SCE_CTRL_RTRIGGER) {
+			if (tick2 == 0) tick2 = sceKernelGetProcessTimeWide();
+			else if (sceKernelGetProcessTimeWide() - tick2 > 4000000) {
+				tick2 = 0;
+				bilinear = (bilinear + 1) % 2;
+			}
+		} else tick2 = 0;
 		
 		updateFramebuf(fb, 960, 544, 960);
 		switch (mode){
@@ -349,12 +350,11 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			break;
 			
 		// Performing a rescale with standard sceGxm without a display queue
-		case RESCALE_NOFILTER:
 		case ORIGINAL:
 			if (!renderer_ready) break;
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
-			sceGxmTextureSetMagFilter(&gxm_texture, mode == ORIGINAL ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
-			sceGxmTextureSetMinFilter(&gxm_texture, mode == ORIGINAL ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+			sceGxmTextureSetMagFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+			sceGxmTextureSetMinFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmSetFrontFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
 			sceGxmSetBackFragmentProgramEnable(gxm_context, SCE_GXM_FRAGMENT_PROGRAM_ENABLED);
 			sceGxmSetFrontPolygonMode(gxm_context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
@@ -379,10 +379,10 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			sceGxmDraw(gxm_context, SCE_GXM_PRIMITIVE_TRIANGLE_FAN, SCE_GXM_INDEX_FORMAT_U16, indices, 4);
 			sceGxmEndScene(gxm_context, NULL, NULL);
 			break;
+		// Performing a rescale with standard sceGxm without a display queue and custom shaders
 		case SHARP_BILINEAR:
 		case SHARP_BILINEAR_SIMPLE:
 		case LCD_3X:
-		case XBR_X2_FAST:
 			if (!renderer_ready) break;
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_w, src_h, 0);
 			sceGxmTextureSetMagFilter(&gxm_texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
@@ -406,12 +406,12 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer);
 			sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fragment_buffer);
 			sceGxmSetUniformDataF(vertex_buffer, wvp, 0, 16, (const float*)mvp);
-			sceGxmSetUniformDataF(vertex_buffer, shader_params[0], 0, 2, (const float*)orig_res);
-			sceGxmSetUniformDataF(vertex_buffer, shader_params[1], 0, 2, (const float*)orig_res);
-			sceGxmSetUniformDataF(vertex_buffer, shader_params[2], 0, 2, (const float*)target_res);
-			sceGxmSetUniformDataF(fragment_buffer, shader_params[3], 0, 2, (const float*)orig_res);
-			sceGxmSetUniformDataF(fragment_buffer, shader_params[4], 0, 2, (const float*)orig_res);
-			sceGxmSetUniformDataF(fragment_buffer, shader_params[5], 0, 2, (const float*)target_res);
+			if (shader_params[0]) sceGxmSetUniformDataF(vertex_buffer, shader_params[0], 0, 2, (const float*)orig_res);
+			if (shader_params[1]) sceGxmSetUniformDataF(vertex_buffer, shader_params[1], 0, 2, (const float*)orig_res);
+			if (shader_params[2]) sceGxmSetUniformDataF(vertex_buffer, shader_params[2], 0, 2, (const float*)target_res);
+			if (shader_params[3]) sceGxmSetUniformDataF(fragment_buffer, shader_params[3], 0, 2, (const float*)orig_res);
+			if (shader_params[4]) sceGxmSetUniformDataF(fragment_buffer, shader_params[4], 0, 2, (const float*)orig_res);
+			if (shader_params[5]) sceGxmSetUniformDataF(fragment_buffer, shader_params[5], 0, 2, (const float*)target_res);
 			sceGxmSetFragmentTexture(gxm_context, 0, &gxm_texture);
 			sceGxmSetVertexStream(gxm_context, 0, vertices_big);
 			sceGxmSetVertexStream(gxm_context, 1, texcoords);
@@ -421,7 +421,8 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		default:
 			break;
 		}
-		drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s)", src_w, src_h, str_mode[mode]);
+		drawStringF(5, 40, "0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X", shader_params[0], shader_params[1], shader_params[2], shader_params[3], shader_params[4], shader_params[5]); 
+		drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
 	}
 	
 	return TAI_CONTINUE(int, refs[1], oldBuffer, newBuffer, callbackData);
@@ -478,7 +479,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 				
 				// Setting up required shaders
 				if (mode <= ORIGINAL) setupStandardShaders();
-				else setupComplexShader(mode - 3);
+				else setupComplexShader(mode - 2);
 
 			}
 			
