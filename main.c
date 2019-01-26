@@ -129,9 +129,9 @@ void setupGenericAttribs() {
 		target_res = (vector2f*)(&gpu_buffer[(sizeof(vector3f) + sizeof(uint16_t) + sizeof(vector2f) + sizeof(vector4f)) * 4 + sizeof(vector2f)]);
 		
 		orig_res[0].x = src_w * 1.0f;
-		orig_res[1].y = src_h * 1.0f;
+		orig_res[0].y = src_h * 1.0f;
 		target_res[0].x = 960.0f;
-		target_res[1].y = 544.0f;
+		target_res[0].y = 544.0f;
 		
 		// Setting up default vertices
 		vertices[0].x = 0.0f;
