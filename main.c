@@ -67,6 +67,7 @@ void *vertex_buffer, *fragment_buffer;
 
 static uint64_t tick = 0;
 static uint64_t tick2 = 0;
+static uint64_t tick3 = 0;
 
 vector2f *orig_res = NULL;
 vector2f *target_res = NULL;
@@ -335,6 +336,13 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 				bilinear = (bilinear + 1) % 2;
 			}
 		} else tick2 = 0;
+		if (pad.buttons & SCE_CTRL_START) {
+			if (tick3 == 0) tick3 = sceKernelGetProcessTimeWide();
+			else if (sceKernelGetProcessTimeWide() - tick3 > 2000000) renderer_ready = 0;
+		} else {
+			tick3 = 0;
+			renderer_ready = 1;
+		}
 		
 		updateFramebuf(fb, 960, 544, 960);
 		switch (mode){
@@ -424,7 +432,7 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		default:
 			break;
 		}
-		drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
+		if (!renderer_ready) drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
 	}
 	
 	return TAI_CONTINUE(int, refs[1], oldBuffer, newBuffer, callbackData);
