@@ -17,8 +17,10 @@
 
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
-#define HOOKS_NUM 4 // Hooked functions num
+#define HOOKS_NUM 5 // Hooked functions num
 #define MODES_NUM 5 // Available rescaling modes
+
+#define HEAP_SIZE 0x3200000
 
 static uint8_t current_hook;
 static SceUID hooks[HOOKS_NUM];
@@ -40,7 +42,7 @@ SceGxmProgram *complex_fshaders[] = {
 	(SceGxmProgram*)&sharp_bilinear_simple_f,
 	(SceGxmProgram*)&lcd3x_f
 };
-const SceGxmProgramParameter *shader_params[6];
+const SceGxmProgramParameter *shader_params[4];
 
 SceGxmVertexProgram *vertex_program_patched = NULL;
 SceGxmFragmentProgram *fragment_program_patched = NULL;
@@ -71,6 +73,9 @@ vector2f *target_res = NULL;
 
 int renderer_ready = 0;
 int bilinear = 0;
+
+uint8_t *cdram_heap = NULL;
+uint32_t cdram_size = 0;
 
 // Available modes 
 enum {
@@ -260,12 +265,10 @@ void setupComplexShader(int i) {
 	vertex_stream[1].stride = sizeof(vector2f);
 	vertex_stream[1].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
 	
-	shader_params[0] = sceGxmProgramFindParameterByName(complex_vshaders[i], "IN.video_size");
-	shader_params[1] = sceGxmProgramFindParameterByName(complex_vshaders[i], "IN.texture_size");
-	shader_params[2] = sceGxmProgramFindParameterByName(complex_vshaders[i], "IN.output_size");
-	shader_params[3] = sceGxmProgramFindParameterByName(complex_fshaders[i], "IN2.video_size");
-	shader_params[4] = sceGxmProgramFindParameterByName(complex_fshaders[i], "IN2.texture_size");
-	shader_params[5] = sceGxmProgramFindParameterByName(complex_fshaders[i], "IN2.output_size");
+	shader_params[0] = sceGxmProgramFindParameterByName(complex_vshaders[i], "texture_size");
+	shader_params[1] = sceGxmProgramFindParameterByName(complex_vshaders[i], "output_size");
+	shader_params[2] = sceGxmProgramFindParameterByName(complex_fshaders[i], "texture_size");
+	shader_params[3] = sceGxmProgramFindParameterByName(complex_fshaders[i], "output_size");
 	
 	// Creating our shader programs
 	sceGxmShaderPatcherCreateVertexProgram(gxm_shader_patcher,
@@ -409,11 +412,9 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 			sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fragment_buffer);
 			sceGxmSetUniformDataF(vertex_buffer, wvp, 0, 16, (const float*)mvp);
 			if (shader_params[0]) sceGxmSetUniformDataF(vertex_buffer, shader_params[0], 0, 2, (const float*)orig_res);
-			if (shader_params[1]) sceGxmSetUniformDataF(vertex_buffer, shader_params[1], 0, 2, (const float*)orig_res);
-			if (shader_params[2]) sceGxmSetUniformDataF(vertex_buffer, shader_params[2], 0, 2, (const float*)target_res);
-			if (shader_params[3]) sceGxmSetUniformDataF(fragment_buffer, shader_params[3], 0, 2, (const float*)orig_res);
-			if (shader_params[4]) sceGxmSetUniformDataF(fragment_buffer, shader_params[4], 0, 2, (const float*)orig_res);
-			if (shader_params[5]) sceGxmSetUniformDataF(fragment_buffer, shader_params[5], 0, 2, (const float*)target_res);
+			if (shader_params[1]) sceGxmSetUniformDataF(vertex_buffer, shader_params[1], 0, 2, (const float*)target_res);
+			if (shader_params[2]) sceGxmSetUniformDataF(fragment_buffer, shader_params[2], 0, 2, (const float*)orig_res);
+			if (shader_params[3]) sceGxmSetUniformDataF(fragment_buffer, shader_params[3], 0, 2, (const float*)target_res);
 			sceGxmSetFragmentTexture(gxm_context, 0, &gxm_texture);
 			sceGxmSetVertexStream(gxm_context, 0, vertices_big);
 			sceGxmSetVertexStream(gxm_context, 1, texcoords);
@@ -423,7 +424,6 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		default:
 			break;
 		}
-		drawStringF(5, 40, "0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X", shader_params[0], shader_params[1], shader_params[2], shader_params[3], shader_params[4], shader_params[5]); 
 		drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
 	}
 	
@@ -446,8 +446,11 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			SceUID memblock = sceKernelAllocMemBlock("reRescaler fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, fb_size, NULL);
 			sceKernelGetMemBlockBase(memblock, &fb);
 			
-			// Not enough CDRAM memory, plugin disabled
-			if (fb == NULL) return TAI_CONTINUE(int, refs[0], pParam, sync);
+			// Not enough CDRAM memory, checking if game uses an heap implementation
+			if (fb == NULL){
+				if (cdram_heap == NULL) return TAI_CONTINUE(int, refs[0], pParam, sync);
+				else fb = &cdram_heap[cdram_size - fb_size];
+			}
 			
 			// Mapping framebuffer into sceGxm and saving constant values for later usage
 			sceGxmMapMemory(fb, fb_size, SCE_GXM_MEMORY_ATTRIB_RW);
@@ -498,6 +501,18 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	return TAI_CONTINUE(int, refs[0], pParam, sync);
 }
 
+int sceKernelAllocMemBlock_patched(const char *name, SceKernelMemBlockType type, int size, void *optp) {
+	int res = TAI_CONTINUE(SceUID, refs[4], name, type, size, optp);
+	
+	// The game seems to use an heap implementation, saving CDRAM heap info
+	if ((type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) && (size > HEAP_SIZE)){
+		sceKernelGetMemBlockBase(res, &cdram_heap);
+		cdram_size = size;
+	}
+	
+	return res;
+}
+
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
 	
@@ -506,6 +521,7 @@ int module_start(SceSize argc, const void *args) {
 	hookFunction(0xEC5C26B5, sceGxmDisplayQueueAddEntry_patched);
 	hookFunction(0xE84CE5B4, sceGxmCreateContext_patched);
 	hookFunction(0x05032658, sceGxmShaderPatcherCreate_patched);
+	hookFunction(0xB9D5EBDE, sceKernelAllocMemBlock_patched);
 	
 	return SCE_KERNEL_START_SUCCESS;
 }
