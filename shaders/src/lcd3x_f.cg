@@ -13,13 +13,6 @@ static const float brighten_scanlines = 32.0;
 static const float brighten_lcd = 12.0;
 static const float3 offsets = 3.141592654 * float3(1.0 / 2.0, 1.0 / 2.0 - 2.0 /3.0, 1.0 / 2.0 - 4.0 / 3.0);
 
-struct input
-{
-   float2 video_size;
-   float2 texture_size;
-   float2 output_size;
-};
-
 struct out_vertex
 {
    float4 vPosition : POSITION;
@@ -30,12 +23,12 @@ float4 main
 (
    out_vertex co,
    uniform sampler2D s0 : TEXUNIT0,
-   uniform input IN2
+   uniform float2 texture_size
 ) : COLOR
 {
    float3 res = tex2D(s0, co.vTexcoord).xyz;
 
-   float2 omega = 3.141592654 * 2.0 * IN2.texture_size;
+   float2 omega = 3.141592654 * 2.0 * texture_size;
 
    float2 angle = co.vTexcoord * omega;
 

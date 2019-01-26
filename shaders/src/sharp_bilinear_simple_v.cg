@@ -16,13 +16,6 @@
    in the vertex shader for speed.
 */
 
-struct input
-{
-   float2 video_size;
-   float2 texture_size;
-   float2 output_size;
-};
-
 struct out_vertex
 {
    float4 vPosition : POSITION;
@@ -36,7 +29,8 @@ void main
    float4 aPosition,
    float2 aTexcoord,
    column_major uniform float4x4 wvp,
-   uniform input IN,
+   uniform float2 texture_size,
+   uniform float2 output_size,
    out out_vertex co
 )
 {
@@ -44,6 +38,6 @@ void main
    co.vTexcoord = aTexcoord;
    
    //precalculate some values to pass to the fragment shader
-   co.texel = aTexcoord * IN.texture_size;
-   co.prescale = max(floor(IN.output_size / IN.texture_size), float2(1.0, 1.0));
+   co.texel = aTexcoord * texture_size;
+   co.prescale = max(floor(output_size / texture_size), float2(1.0, 1.0));
 }
