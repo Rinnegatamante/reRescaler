@@ -68,15 +68,19 @@ void *vertex_buffer, *fragment_buffer;
 static uint64_t tick = 0;
 static uint64_t tick2 = 0;
 static uint64_t tick3 = 0;
+static uint64_t lock_tick = 0;
 
 vector2f *orig_res = NULL;
 vector2f *target_res = NULL;
 
 int renderer_ready = 0;
-int bilinear = 0;
+int lock = 0;
+int bilinear = 1;
 
 uint8_t *cdram_heap = NULL;
 uint32_t cdram_size = 0;
+
+char cfg_fname[256];
 
 // Available modes 
 enum {
@@ -87,6 +91,14 @@ enum {
 	LCD_3X
 };
 
+// Lock screen modes
+enum {
+	UNLOCKED,
+	MODE_CHANGE,
+	LOCK_CHANGE,
+	STARTUP_INFO
+};
+
 char *str_mode[MODES_NUM] = {
 	"No Rescaler",
 	"Original",
@@ -95,7 +107,22 @@ char *str_mode[MODES_NUM] = {
 	"LCD x3"
 };
 
-int mode = RESCALER_OFF;
+int mode = ORIGINAL;
+int lock_screen = STARTUP_INFO;
+
+void saveConfig() {
+	
+	// Saving the new config file
+	SceUID fd = sceIoOpen(cfg_fname, SCE_O_CREAT | SCE_O_TRUNC | SCE_O_WRONLY, 0777);
+	if (fd >= 0) {
+		char cfg[32];
+		sprintf(cfg, "%i;%i;%i", mode, bilinear, lock);
+		sceIoWrite(fd, cfg, strlen(cfg));
+		sceIoClose(fd);
+	}
+	
+	// Locking screen for a second to show info about changed mode
+}
 
 void releaseOldShader() {
 	if (vertex_program_patched != NULL) {
@@ -314,11 +341,14 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		
 		SceCtrlData pad;
 		sceCtrlPeekBufferPositive(0, &pad, 1);
-		if (pad.buttons & SCE_CTRL_LTRIGGER) {
+		if ((!lock) && (pad.buttons & SCE_CTRL_LTRIGGER)) {
 			if (tick == 0) tick = sceKernelGetProcessTimeWide();
 			else if (sceKernelGetProcessTimeWide() - tick > 4000000) {
 				tick = 0;
 				mode = (mode + 1) % MODES_NUM;
+				lock_screen = MODE_CHANGE;
+				lock_tick = sceKernelGetProcessTimeWide();
+				saveConfig();
 				if (mode > RESCALER_OFF && gxm_render_target != NULL) {
 				
 					// Setting up required shaders
@@ -329,20 +359,26 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 				}
 			}
 		} else tick = 0;
-		if (pad.buttons & SCE_CTRL_RTRIGGER) {
+		if ((!lock) && (pad.buttons & SCE_CTRL_RTRIGGER)) {
 			if (tick2 == 0) tick2 = sceKernelGetProcessTimeWide();
 			else if (sceKernelGetProcessTimeWide() - tick2 > 4000000) {
 				tick2 = 0;
+				lock_screen = MODE_CHANGE;
+				lock_tick = sceKernelGetProcessTimeWide();
 				bilinear = (bilinear + 1) % 2;
+				saveConfig();
 			}
 		} else tick2 = 0;
 		if (pad.buttons & SCE_CTRL_START) {
 			if (tick3 == 0) tick3 = sceKernelGetProcessTimeWide();
-			else if (sceKernelGetProcessTimeWide() - tick3 > 2000000) renderer_ready = 0;
-		} else {
-			tick3 = 0;
-			renderer_ready = 1;
-		}
+			else if (sceKernelGetProcessTimeWide() - tick3 > 2000000) {
+				lock = (lock + 1) % 2;
+				lock_screen = LOCK_CHANGE;
+				lock_tick = sceKernelGetProcessTimeWide();
+				tick3 = 0;
+				saveConfig();
+			}
+		} else tick3 = 0;
 		
 		updateFramebuf(fb, 960, 544, 960);
 		switch (mode){
@@ -364,6 +400,7 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		// Performing a rescale with standard sceGxm without a display queue
 		case ORIGINAL:
 			if (!renderer_ready) break;
+			if (lock_screen) break;
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_s, src_h, 0);
 			sceGxmTextureSetMagFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmTextureSetMinFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
@@ -397,6 +434,7 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		case SHARP_BILINEAR_SIMPLE:
 		case LCD_3X:
 			if (!renderer_ready) break;
+			if (lock_screen) break;
 			sceGxmTextureInitLinear(&gxm_texture, src_fb, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, src_s, src_h, 0);
 			sceGxmTextureSetMagFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmTextureSetMinFilter(&gxm_texture, bilinear ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
@@ -432,7 +470,26 @@ int sceGxmDisplayQueueAddEntry_patched(SceGxmSyncObject *oldBuffer, SceGxmSyncOb
 		default:
 			break;
 		}
-		if (!renderer_ready) drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
+		if (lock_screen) {
+			switch (lock_screen) {
+			case MODE_CHANGE:
+				drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
+				if (sceKernelGetProcessTimeWide() - lock_tick > 1000000) lock_screen = UNLOCKED;
+				break;
+			case LOCK_CHANGE:
+				drawStringF(5, 20, "reRescaler: Mode Switching %s!", lock ? "locked" : "unlocked");
+				if (sceKernelGetProcessTimeWide() - lock_tick > 1000000) lock_screen = UNLOCKED;
+				break;
+			case STARTUP_INFO:
+				drawStringF(5, 20, "reRescaler: %ix%i -> 960x544 (%s - %s)", src_w, src_h, str_mode[mode], bilinear ? "Bilinear ON" : "Bilinear OFF");
+				if (lock_tick == 0) lock_tick = sceKernelGetProcessTimeWide();
+				if (sceKernelGetProcessTimeWide() - lock_tick > 2500000) lock_screen = UNLOCKED;
+				break;
+			default:
+				break;
+			}
+			
+		}
 	}
 	
 	return TAI_CONTINUE(int, refs[1], oldBuffer, newBuffer, callbackData);
@@ -523,6 +580,19 @@ int sceKernelAllocMemBlock_patched(const char *name, SceKernelMemBlockType type,
 
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
+	
+	// Reading config file if existing
+	sceIoMkdir("ux0:data/reRescaler", 0777);
+	char titleid[16];
+	sceAppMgrAppParamGetString(0, 12, titleid , 256);
+	sprintf(cfg_fname, "ux0:data/reRescaler/%s.txt", titleid);
+	SceUID fd = sceIoOpen(cfg_fname, SCE_O_RDONLY, 0777);
+	if (fd >= 0) {
+		char cfg[32];
+		sceIoRead(fd, cfg, 32);
+		sscanf(cfg, "%i;%i;%i", &mode, &bilinear, &lock);
+		sceIoClose(fd);
+	}
 	
 	// Hooking functions
 	hookFunction(0x7A410B64, sceDisplaySetFrameBuf_patched);
