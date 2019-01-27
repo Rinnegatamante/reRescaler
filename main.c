@@ -581,10 +581,17 @@ int sceKernelAllocMemBlock_patched(const char *name, SceKernelMemBlockType type,
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
 	
-	// Reading config file if existing
-	sceIoMkdir("ux0:data/reRescaler", 0777);
+	// Getting titleid
 	char titleid[16];
 	sceAppMgrAppParamGetString(0, 12, titleid , 256);
+	
+	// Blacklisted games
+	if (strcmp(titleid, "PCSE00051") == 0) { // Urban Trial Freestyle (GPU Crash)
+		return SCE_KERNEL_START_SUCCESS;
+	}
+	
+	// Reading config file if existing
+	sceIoMkdir("ux0:data/reRescaler", 0777);
 	sprintf(cfg_fname, "ux0:data/reRescaler/%s.txt", titleid);
 	SceUID fd = sceIoOpen(cfg_fname, SCE_O_RDONLY, 0777);
 	if (fd >= 0) {
